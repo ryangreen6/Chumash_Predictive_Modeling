@@ -1,0 +1,478 @@
+---
+title: "Chumash Predictive Modeling"
+author: "Ryan Green"
+date: 12/10/24
+execute:
+  warning: false
+  message: false
+  results: hide
+  enabled: true
+categories: [Chumash, R, EDS222, Logistic Regression]
+output:
+  distill::distill_article:
+    self_contained: false
+    toc: true
+    toc_float: true
+image: pictures/thumbnail.png
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, Libraries, results='hide'}
+library(sf)
+library(here)
+library(tmap)
+library(nngeo)
+library(terra)
+library(tidyverse)
+library(dynlm)
+library(spdep)
+```
+
+## Reading in Data
+
+```{r, Read in Data, results='hide'}
+# Creeks
+channel_islands_creeks <- st_read(here("data", "NHD_H_18060014_HU8_Shape", "Shape", "NHDFlowline.shp"))
+creeks <- st_read(here("data", "NHD_H_18060013_HU8_Shape", "Shape", "NHDFlowline.shp"))
+
+# Elevation Rasters
+tif1 <- rast(here("data", "USGS_1_n35w121_20210301.tif")) # Point Conception Tile
+tif2 <- rast(here("data", "USGS_1_n35w120_20240207.tif")) # SB, Ventura Tile
+tif3 <- rast(here("data", "USGS_1_n34w121_20130911.tif")) # South Santa Rosa Island Tile
+tif4 <- rast(here("data", "USGS_1_n34w120_20130911.tif")) # South Santa Cruz Island Tile
+
+# Merge rasters into one tile
+elevation_raster <- merge(tif1, tif2, tif3, tif4)
+# Set elevation < 1 to NA
+elevation_raster[elevation_raster < 1] <- NA
+# Clean up environment by removing original elevation rasters
+rm(tif1, tif2, tif3, tif4)
+```
+
+## Creating Extents and Cropping Rasters
+
+```{r, Cropping Rasters, results='hide'}
+# Creating extents
+santa_barbara_extent <- ext(-120.14, -119.37, 34.31, 34.57)
+point_conception_extent <- ext(-120.525807, -120.338867, 34.43, 34.521897)
+
+# Cropping rasters using extents
+santa_barbara_map_rast <- terra::crop(elevation_raster, santa_barbara_extent)
+point_conception_map_rast <- terra::crop(elevation_raster, point_conception_extent)
+```
+
+## Data for Point Conception Archaeological Sites
+
+```{r, Actual Archaeological Site Locations, Point Conception, results='hide'}
+# Establishing dataframes of coordinates for each point (site)
+early_sites <- data.frame(
+  lon = c(-120.478075, -120.464917, -120.472431, -120.423728),
+  lat = c(34.482333, 34.468369, 34.459728, 34.457061)
+)
+
+middle_sites <- data.frame(
+  lon = c(-120.484033, -120.462561, -120.456017, -120.439172, -120.417517, -120.467314,
+          -120.465567),
+  lat = c(34.486821, 34.479497, 34.461642, 34.454397, 34.453544, 34.4493, 34.4497)
+)
+
+late_sites <- data.frame(
+  lon = c(-120.484061, -120.472714, -120.471825, -120.446807, -120.443714, -120.470214, -120.468167, -120.470469, -120.470764, -120.470353, -120.4673, -120.464614, -120.463492, -120.462292),
+  lat = c(34.484853, 34.460742, 34.454228, 34.45, 34.451767, 34.449558, 34.4503, 34.452011, 34.452331, 34.452164, 34.451886, 34.45115, 34.449714, 34.448922)
+)
+
+# Assigning each their ages
+early_sites$age <- "Early Holocene"
+middle_sites$age <- "Middle Holocene"
+late_sites$age <- "Late Holocene"
+
+# Making shapefiles of each site dataframe, using Google Earth CRS
+early_sites <- st_as_sf(early_sites, coords = c("lon", "lat"), crs = st_crs(4326))
+middle_sites <- st_as_sf(middle_sites, coords = c("lon", "lat"), crs = st_crs(4326))
+late_sites <- st_as_sf(late_sites, coords = c("lon", "lat"), crs = st_crs(4326))
+
+# Transforming to NAD83 CRS
+early_sites <- st_transform(early_sites, st_crs(4269))
+middle_sites <- st_transform(middle_sites, st_crs(4269))
+late_sites <- st_transform(late_sites, st_crs(4269))
+
+# Combining all into a single frame
+all_sites <- rbind(early_sites, middle_sites, late_sites)
+
+# Setting presence for all actual sites to 1
+all_sites$presence <- 1
+```
+
+## Extracting Elevations and Distance to Water Sources for All Sites
+
+```{r, Finding Site Elevations, results='hide'}
+# Creating a SpatVector object out of sites shapefile
+points_vect <- vect(all_sites)
+
+# Extracting elevations from elevation raster
+extracted <- terra::extract(elevation_raster, points_vect)
+
+# Adding elevations to a new column in `all_sites`
+all_sites$elevation_m <- extracted$USGS_1_n35w121_20210301
+
+# Clean up environment by removing SpatVector object and extracted elevations
+rm(points_vect, extracted)
+```
+
+```{r, Finding Site Distance to Water, results='hide'}
+# Establishing function to calculate distance to Creeks shapefile for each point
+creeks_nozm <- st_zm(creeks, drop = TRUE, what = "ZM")
+
+dist2creek <- function(site, creeks) {
+  nngeo::st_nn(site, 
+               creeks,
+               k = 1, 
+               returnDist = TRUE, 
+               progress = FALSE)$dist[[1]]
+}
+# Adding those distances to a new column in `all_sites`
+all_sites$water_proximity <- as.numeric(nngeo::st_nn(all_sites, 
+                                                     creeks_nozm, 
+                                                     k = 1, 
+                                                     returnDist = TRUE)$dist)
+# Creating a copy of all_sites, for mapping later
+sites_actual <- all_sites
+```
+
+## Contextual Map of Sites at Point Conception
+
+```{r, Initial Map of Actual Sites at Point Conception}
+pc_sites_map <- tm_shape(point_conception_map_rast) +
+  tm_raster(title = 'Elevation (m)') +
+tm_shape(creeks) +
+  tm_lines(col = "royalblue",
+           lwd = 0.6,
+           legend.lwd.show = FALSE) +
+tm_add_legend(type = "line", 
+              labels = "Creeks", 
+              col = "royalblue", 
+              lwd = 2) +
+tm_shape(early_sites) +
+  tm_dots(shape = 21,
+          col = "blue",
+          size = 0.2,
+          legend.show = TRUE) +
+tm_add_legend(type = "symbol", 
+              labels = "Early Holocene",
+              col = "blue", 
+              shape = 21) +
+tm_shape(middle_sites) +
+  tm_dots(shape = 21,
+          col = "green",
+          size = 0.2,
+          legend.show = TRUE) +
+tm_add_legend(type = "symbol", 
+              labels = "Middle Holocene",
+              col = "green", 
+              shape = 21) +
+tm_shape(late_sites) +
+  tm_dots(shape = 21,
+          col = "yellow",
+          size = 0.2,
+          legend.show = TRUE) +
+tm_add_legend(type = "symbol", 
+              labels = "Late Holocene",
+              col = "yellow", 
+              shape = 21) +
+tm_layout(inner.margins = c(0,0,0,0),
+          legend.outside = TRUE,
+          main.title = "Chumash Archaeological Sites, Point Conception")
+
+tmap_save(
+  tm = pc_sites_map,
+  filename = "pc_sites_map.png",
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+pc_sites_map
+
+```
+
+
+## Creating Absence Points
+
+```{r, Absence Points, Point Conception, results='hide'}
+# Sampling 2,000 points from the Point Conception Map
+set.seed(123)
+absence_points <- spatSample(point_conception_map_rast, size = 2000, method = "regular", as.points = TRUE)
+
+# Extracting the elevations of every point
+extracted_absence_sb <- terra::extract(elevation_raster, absence_points)
+
+# Adding elevations to absence_points dataframe
+absence_points$elevation_m <- extracted_absence_sb$USGS_1_n35w121_20210301
+
+# Setting absence_points presence to 0, and age to NA
+absence_points$presence <- 0
+absence_points$age <- NA
+
+# Creating shapefile of absence points
+absence_points <- st_as_sf(absence_points)
+
+# Calculating distance to water sources for each absence point
+absence_points <- subset(absence_points, elevation_m >= 1) %>%
+  select(-USGS_1_n35w121_20210301)
+
+absence_points$water_proximity <- as.numeric(nngeo::st_nn(absence_points, 
+                                                     creeks_nozm, 
+                                                     k = 1, 
+                                                     returnDist = TRUE)$dist)
+
+# Combining absence points dataframe to actual sites dataframe
+all_sites <- rbind(all_sites, absence_points)
+
+# Setting presence to an integer
+all_sites$presence <- as.integer(all_sites$presence)
+
+# Clean up environment by removing absence points dataframe and its elevations dataframe
+rm(absence_points, extracted_absence_sb)
+```
+
+```{r, Logistic Regression Models}
+# Fitting logistic regression model, using transformed `water_proximity`
+logit_mod <- glm(presence ~ elevation_m + sqrt(water_proximity), 
+                 data = all_sites, 
+                 family = binomial)
+
+# Extracting the residuals
+all_sites$residual <- resid(logit_mod)
+
+# Creating a spatial weights matrix
+all_sites_sf <- st_as_sf(all_sites, coords = c("longitude", "latitude"), crs = 4269)
+all_sites_nb <- dnearneigh(all_sites_sf, d1 = 0, d2 = 50) # Nearest neighbor within 25 meters
+all_sites_lw <- nb2listw(all_sites_nb, style = "W")
+
+# Creating a spatial lag of the independent variable
+lag_elevation <- lag.listw(all_sites_lw, all_sites$elevation_m)
+
+# Fitting logistic regression model with the spatially lagged variable
+logit_mod_spatial <- glm(presence ~ elevation_m + sqrt(water_proximity) + lag_elevation, 
+                         data = all_sites, 
+                         family = binomial)
+
+# Adding the predicted probability to all_sites
+all_sites$predicted_prob <- predict(logit_mod_spatial, type = "response")
+
+# Model summary
+summary(logit_mod_spatial)
+
+```
+
+```{r}
+ggplot(all_sites, aes(x = elevation_m, 
+                      y = predicted_prob)) +
+  geom_point(alpha = 0.5, 
+             color = "blue") + 
+  geom_smooth(method = "glm", 
+              method.args = list(family = "binomial"), 
+              se = FALSE, 
+              color = "red") +
+  labs(x = "Elevation (m)", 
+       y = "Predicted Probability of Presence", 
+       title = "Predicted Probability of Site Presence by Elevation") +
+  theme_minimal()
+
+```
+
+```{r}
+all_sites_sf <- st_as_sf(all_sites, coords = c("longitude", "latitude"), crs = 4269)
+
+ggplot(all_sites_sf) +
+  geom_sf(aes(color = predicted_prob), 
+          size = 4,
+          shape = 15) +
+  scale_color_viridis_c(option = "C", 
+                        name = "Predicted Probability") +
+  labs(title = "Predicted Probabilities of Presence",
+       subtitle = "Based on Elevation and Water Proximity") +
+  theme_minimal()
+
+```
+
+```{r}
+pc_predicted_map <- tm_shape(point_conception_map_rast) +
+  tm_raster(palette = 'Greys',
+            legend.show = FALSE) +
+tm_shape(creeks) +
+  tm_lines(col = 'royalblue') +
+tm_shape(all_sites_sf) +
+  tm_dots(col = 'predicted_prob',
+          palette = 'Spectral',
+          size = 0.8,
+          shape = 15,
+          alpha = 0.7,
+          title = 'Probability') +
+tm_shape(sites_actual) +
+  tm_dots(size = 0.1,
+          legend.show = TRUE) +
+tm_add_legend(type = "line", 
+              labels = "Creeks", 
+              col = "royalblue", 
+              lwd = 2) +
+tm_add_legend(type = "symbol", 
+              labels = "Confirmed Sites", 
+              col = "black", 
+              lwd = 2,
+              size = 0.3) +
+tm_layout(inner.margins = c(0,0,0,0),
+          main.title = 'Predicted Site Probabilities, Point Conception',
+          legend.outside = TRUE)
+
+tmap_save(
+  tm = pc_predicted_map,
+  filename = "pc_predicted_map.png",
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+pc_predicted_map
+```
+
+---
+
+# Applying the model to SB
+
+```{r, Generating Points for Hypothetical Sites in Santa Barbara Area, results='hide'}
+# Generating random points
+set.seed(123)
+hypo_sites <- spatSample(santa_barbara_map_rast, size = 20000, method = "regular", as.points = TRUE)
+```
+
+```{r, Extracting Elevations for Hypothetical Sites, results='hide'}
+# Transforming to shapefile
+hypo_sites <- st_as_sf(hypo_sites)
+
+# Vectorizing
+hypo_points <- vect(hypo_sites)
+
+# Extracting elevations
+extracted <- terra::extract(elevation_raster, hypo_points)
+hypo_sites$elevation_m <- extracted$USGS_1_n35w121_20210301
+
+# Filtering any elevation less than 1
+hypo_sites <- hypo_sites %>%
+  filter(elevation_m >= 1)
+```
+
+```{r, Calculating Distance to Creeks for Hypothetical Sites, results='hide'}
+# Caulculating distance to creeks
+hypo_sites$water_proximity <- as.numeric(nngeo::st_nn(hypo_sites, 
+                                                     creeks_nozm, 
+                                                     k = 1, 
+                                                     returnDist = TRUE)$dist)
+```
+
+```{r, Arranging Hypothetical Sites Dataframe, results='hide'}
+# Setting values for presence and age
+hypo_sites$presence <- 0
+hypo_sites$age <- NA
+
+# Converting to shapefile
+hypo_sites <- st_as_sf(hypo_sites)
+
+# Remove unneccesary column, filter to elevation > 1m, water_proximity <= 2000m
+hypo_sites <- hypo_sites %>%
+  filter(elevation_m >= 1) %>%
+  select(-USGS_1_n35w121_20210301) %>%
+  filter(water_proximity <= 2000)
+```
+
+```{r, Presence and Presence Threshold for Hypothetical Sites, results='hide'}
+# Setting presence values to integers
+hypo_sites$presence <- as.integer(hypo_sites$presence)
+
+# Assigning presence value of 1 (present) to values within 10 meters of the mean elevation of the actual Point Conception sites
+hypo_sites$presence <- ifelse(hypo_sites$elevation_m >= 32 & hypo_sites$elevation_m <= 52, 1, 0)
+```
+
+```{r, Logit Model for Hypothetical Sites}
+# Fitting logistic regression model, using transformed `water_proximity`
+logit_hypo <- glm(presence ~ elevation_m + sqrt(water_proximity),
+                 data = hypo_sites, 
+                 family = binomial)
+
+# Extracting the residuals
+hypo_sites$residual <- resid(logit_hypo)
+
+# Creating a spatial weights matrix
+hypo_sites_sf <- st_as_sf(hypo_sites, coords = c("longitude", "latitude"), crs = 4269)
+hypo_sites_nb <- dnearneigh(hypo_sites_sf, d1 = 0, d2 = 50)
+hypo_sites_lw <- nb2listw(hypo_sites_nb, style = "W")
+
+# Creating a spatial lag of the independent variable
+lag_elevation <- lag.listw(hypo_sites_lw, hypo_sites$elevation_m)
+
+# Fitting logistic regression model with the spatially lagged variable
+logit_hypo_spatial <- glm(presence ~ elevation_m + sqrt(water_proximity) + lag_elevation, 
+                         data = hypo_sites, 
+                         family = binomial)
+
+# Adding the predicted probability to all_sites
+hypo_sites$predicted_prob <- predict(logit_hypo_spatial, type = "response")
+
+# Model summary
+summary(logit_hypo_spatial)
+```
+
+```{r, Hypothetical Sites Presence ~ Elevation}
+ggplot(hypo_sites, aes(x = elevation_m, y = predicted_prob)) +
+  geom_point(alpha = 0.5, color = "royalblue") + 
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "darkred") +
+  labs(x = "Elevation (m)", 
+       y = "Predicted Probability of Presence", 
+       title = "Predicted Probability of Site Presence by Elevation") +
+  theme_minimal()
+```
+
+```{r, Plotting Hypothetical Site Probability}
+hypo_sites_sf <- st_as_sf(hypo_sites, coords = c("longitude", "latitude"), crs = 4269)
+
+ggplot(hypo_sites_sf) +
+  geom_sf(aes(color = predicted_prob), size = 1) +
+  scale_color_viridis_c(option = "C", name = "Predicted Probability") +
+  labs(title = "Probability of Site Presence",
+       subtitle = "Based on Elevation and Water Proximity") +
+  theme_linedraw()
+```
+
+```{r, Mapping Probability of Hypothetical Site Presence}
+sb_predicted_map <- tm_shape(santa_barbara_map_rast) +
+  tm_raster(palette = 'Greys',
+            legend.show = TRUE,
+            title = 'Elevation (m)') +
+tm_shape(hypo_sites_sf) +
+  tm_dots(col = 'predicted_prob',
+          palette = 'Spectral',
+          size = 0.2,
+          shape = 15,
+          breaks = seq(from = 0, to = .4, by = 0.05),
+          title = 'Site Presence Probability') +
+tm_layout(inner.margins = c(0,0,0,0),
+          main.title = 'Predicted Site Probabilities, Santa Barbara South County',
+          legend.outside = TRUE)
+
+tmap_save(
+  tm = sb_predicted_map,
+  filename = "sb_predicted_map.png",
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+sb_predicted_map
+```
+
+
+
+
+
+

@@ -1,1 +1,1 @@
-# Chumash_Predictive_Modeling
+# EDS222_Final_Project
