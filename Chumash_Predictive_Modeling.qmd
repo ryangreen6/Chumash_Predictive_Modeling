@@ -7,13 +7,10 @@ execute:
   message: false
   results: hide
   enabled: true
-categories: [Chumash, R, EDS222, Logistic Regression]
 output:
   distill::distill_article:
     self_contained: false
     toc: true
-    toc_float: true
-image: pictures/thumbnail.png
 editor_options: 
   chunk_output_type: console
 ---
@@ -33,7 +30,6 @@ library(spdep)
 
 ```{r, Read in Data, results='hide'}
 # Creeks
-channel_islands_creeks <- st_read(here("data", "NHD_H_18060014_HU8_Shape", "Shape", "NHDFlowline.shp"))
 creeks <- st_read(here("data", "NHD_H_18060013_HU8_Shape", "Shape", "NHDFlowline.shp"))
 
 # Elevation Rasters
@@ -142,7 +138,7 @@ sites_actual <- all_sites
 
 ## Contextual Map of Sites at Point Conception
 
-```{r, Initial Map of Actual Sites at Point Conception}
+```{r, Initial Map of Actual Sites at Point Conception, fig.align='center'}
 pc_sites_map <- tm_shape(point_conception_map_rast) +
   tm_raster(title = 'Elevation (m)') +
 tm_shape(creeks) +
@@ -279,7 +275,6 @@ ggplot(all_sites, aes(x = elevation_m,
        y = "Predicted Probability of Presence", 
        title = "Predicted Probability of Site Presence by Elevation") +
   theme_minimal()
-
 ```
 
 ```{r}
@@ -297,7 +292,7 @@ ggplot(all_sites_sf) +
 
 ```
 
-```{r}
+```{r, fig.height= 7, fig.width=14, fig.align='center'}
 pc_predicted_map <- tm_shape(point_conception_map_rast) +
   tm_raster(palette = 'Greys',
             legend.show = FALSE) +
@@ -444,7 +439,7 @@ ggplot(hypo_sites_sf) +
   theme_linedraw()
 ```
 
-```{r, Mapping Probability of Hypothetical Site Presence}
+```{r, Mapping Probability of Hypothetical Site Presence, fig.height= 7, fig.width=14, fig.align='center'}
 sb_predicted_map <- tm_shape(santa_barbara_map_rast) +
   tm_raster(palette = 'Greys',
             legend.show = TRUE,
@@ -470,8 +465,6 @@ tmap_save(
 
 sb_predicted_map
 ```
-
-
 
 
 
