@@ -8,5 +8,5 @@ Data is not included in this repository, but the required data can be accessed v
 
 The data used for this project is as follows:
 
-* Elevation Products (3DEP), 1 arc-second GeoTIFF Digital Elevation Models. 4 tiles covering the Santa Barbara and Channel Islands area.
-* Hydrography, National Hydrography Dataset, HU-4 Subregion Shapefile
+* Elevation Products (3DEP), 1 arc-second GeoTIFF Digital Elevation Models. 4 tiles covering the Santa Barbara and Channel Islands area
+* Hydrography, National Hydrography Dataset, HU-4 Subregion Shapefile, Santa Barbara area
